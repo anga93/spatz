@@ -9,6 +9,19 @@
 #include "sim.hh"
 #include "tb_lib.hh"
 #include "verilated.h"
+
+#ifdef FAULT_INJECTION_ENABLE
+// Faultergeist fault injection (https://github.com/antmicro/faultergeist).
+// The campaign file is taken from the FI_CAMPAIGN environment variable, so
+// different campaigns run on the same simulator binary.
+#include <cstdlib>
+
+#include "verilated_vpi.h"
+extern "C" void FaultergeistCreate(const char *input_file);
+extern "C" void FaultergeistDestroy(void);
+static bool fi_enabled = false;
+#endif
+
 namespace sim {
 
 Sim* s;
@@ -32,6 +45,12 @@ int Sim::run() {
     target.init(sim_thread_main, this);
 
     int exit_code = htif_t::run();
+#ifdef FAULT_INJECTION_ENABLE
+    if (fi_enabled) {
+        VerilatedVpi::callCbs(cbEndOfSimulation);
+        FaultergeistDestroy();
+    }
+#endif
     if (exit_code == 0)
       fprintf(stderr, "[SUCCESS] Program finished successfully\n");
     else
@@ -51,13 +70,30 @@ void Sim::main() {
 
     bool clk_i = 0, rst_ni = 0;
 
+#ifdef FAULT_INJECTION_ENABLE
+    if (const char *campaign = std::getenv("FI_CAMPAIGN")) {
+        fi_enabled = true;
+        FaultergeistCreate(campaign);
+        VerilatedVpi::callCbs(cbStartOfSimulation);
+    }
+#endif
+
     while (!Verilated::gotFinish()) {
         clk_i = !clk_i;
         rst_ni = TIME >= 8;
         top->clk_i = clk_i;
         top->rst_ni = rst_ni;
+        // Expose the time to the model (waveform timestamps, $time, VPI).
+        Verilated::time(TIME);
+#ifdef FAULT_INJECTION_ENABLE
+        // Inject the faults due at this time, before evaluating the DUT.
+        if (fi_enabled) VerilatedVpi::callTimedCbs();
+#endif
         // Evaluate the DUT.
         top->eval();
+#ifdef FAULT_INJECTION_ENABLE
+        if (fi_enabled) VerilatedVpi::callValueCbs();
+#endif
         // Increase global time.
         TIME++;
         // Switch to the HTIF interface in regular intervals.

@@ -56,6 +56,34 @@ ifeq ($(SPATZ_CLUSTER_VENTAGLIO),1)
 	SPATZ_CLUSTER_CFG_DEFINES += -DSPATZ_CLUSTER_VENTAGLIO=1
 endif
 
+# Waveforms: `make bin/spatz_cluster_fst.vlt VCD=1` builds a separate Verilator
+# simulator (in its own build directory) that dumps the cluster to
+# spatz_cluster.fst while the software holds the cluster probe high, i.e.
+# between start_kernel() and stop_kernel() in the benchmarks.
+VLT_BIN ?= bin/spatz_cluster.vlt
+ifeq ($(VCD),1)
+	VLT_BUILDDIR   := work-vlt-fst
+	VLT_BIN        := bin/spatz_cluster_fst.vlt
+	VLT_FLAGS      += --trace-fst -DVCD_DUMP '-DVCD_DUMP_FILE="spatz_cluster.fst"'
+	VLT_COBJ_TRACE  = $(VLT_BUILDDIR)/vlt/verilated_fst_c.o
+	VLT_LDLIBS     += -lz
+endif
+
+# Fault injection with Faultergeist:
+#   make bin/spatz_cluster_fi.vlt FI=1 FI_VLT_CONFIG=<config.vlt> FAULTERGEIST_LIB=<dir>
+#   FI_CAMPAIGN=<fault_campaign.csv> bin/spatz_cluster_fi.vlt <binary>
+# FI_VLT_CONFIG is the config.vlt written by faultergeist-gen (signals exposed to
+# VPI), FAULTERGEIST_LIB the directory of libfaultergeist-inject.a. Without
+# FI_CAMPAIGN the simulator runs without injecting faults.
+ifeq ($(FI),1)
+	VLT_BUILDDIR   := work-vlt-fi
+	VLT_BIN        := bin/spatz_cluster_fi.vlt
+	VLT_FLAGS      += --vpi $(FI_VLT_CONFIG)
+	VLT_CFLAGS     += -DFAULT_INJECTION_ENABLE
+	VLT_COBJ_FI     = $(VLT_BUILDDIR)/vlt/verilated_vpi.o
+	VLT_LDLIBS     += -L$(FAULTERGEIST_LIB) -lfaultergeist-inject
+endif
+
 # Include Makefrag
 include $(ROOT)/util/Makefrag
 
@@ -104,15 +132,29 @@ VLT_COBJ += $(VLT_BUILDDIR)/vlt/verilated_timing.o
 VLT_COBJ += $(VLT_BUILDDIR)/vlt/verilated_threads.o
 VLT_COBJ += $(VLT_BUILDDIR)/vlt/verilated_dpi.o
 VLT_COBJ += $(VLT_BUILDDIR)/vlt/verilated_vcd_c.o
+VLT_COBJ += $(VLT_COBJ_TRACE)
+VLT_COBJ += $(VLT_COBJ_FI)
 
 #################
 # Prerequisites #
 #################
 
+# Build the bootrom with the RISC-V GCC if it is installed, otherwise with the
+# LLVM toolchain (e.g. on macOS, where the pinned GCC does not build).
+ifneq ($(wildcard ${GCC_INSTALL_DIR}/bin/riscv32-unknown-elf-gcc),)
+BOOTROM_CC      = ${GCC_INSTALL_DIR}/bin/riscv32-unknown-elf-gcc
+BOOTROM_OBJDUMP = ${GCC_INSTALL_DIR}/bin/riscv32-unknown-elf-objdump
+BOOTROM_OBJCOPY = ${GCC_INSTALL_DIR}/bin/riscv32-unknown-elf-objcopy
+else
+BOOTROM_CC      = ${LLVM_INSTALL_DIR}/bin/clang --target=riscv32-unknown-elf -nostdlib -fuse-ld=lld
+BOOTROM_OBJDUMP = ${LLVM_INSTALL_DIR}/bin/llvm-objdump
+BOOTROM_OBJCOPY = ${LLVM_INSTALL_DIR}/bin/llvm-objcopy
+endif
+
 test/bootrom.elf test/bootrom.dump test/bootrom.bin: src/generated/spatz_cluster_wrapper.sv test/bootrom.S test/bootrom.ld test/bootdata_bootrom.cc Makefile
-	${GCC_INSTALL_DIR}/bin/riscv32-unknown-elf-gcc -mabi=ilp32 -march=rv32imaf -static -nostartfiles -Ttest/bootrom.ld test/bootrom.S test/bootdata_bootrom.cc -I../../ip/snitch_test/src -I../../../sw/snRuntime/include -I../../../sw/toolchain/riscv-opcodes/ -o test/bootrom.elf
-	${GCC_INSTALL_DIR}/bin/riscv32-unknown-elf-objdump -D test/bootrom.elf > test/bootrom.dump
-	${GCC_INSTALL_DIR}/bin/riscv32-unknown-elf-objcopy -O binary test/bootrom.elf test/bootrom.bin
+	${BOOTROM_CC} -mabi=ilp32 -march=rv32imaf -static -nostartfiles -Ttest/bootrom.ld test/bootrom.S test/bootdata_bootrom.cc -I../../ip/snitch_test/src -I../../../sw/snRuntime/include -I../../../sw/toolchain/riscv-opcodes/ -o test/bootrom.elf
+	${BOOTROM_OBJDUMP} -D test/bootrom.elf > test/bootrom.dump
+	${BOOTROM_OBJCOPY} -O binary test/bootrom.elf test/bootrom.bin
 
 .PHONY: bootrom
 bootrom: $(CURDIR)/src/generated/bootrom.sv
@@ -184,18 +226,22 @@ $(VLT_BUILDDIR)/test/%.o: test/%.cc ${VLT_BUILDDIR}/lib/libfesvr.a
 
 $(VLT_BUILDDIR)/test/uartdpi/uartdpi.o: test/uartdpi/uartdpi.c
 	mkdir -p $(dir $@)
-	$(CC) $(CXXFLAGS) $(VLT_CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(filter-out -std=c++% -fcoroutines,$(VLT_CFLAGS)) -c $< -o $@
 
 # Link verilated archive wich $(VLT_COBJ)
-bin/spatz_cluster.vlt: $(VLT_AR) $(VLT_COBJ) ${VLT_BUILDDIR}/lib/libfesvr.a
+# macOS has no libatomic: atomics are provided by the compiler runtime.
+ifneq ($(shell uname -s),Darwin)
+VLT_LDLIBS += -latomic
+endif
+$(VLT_BIN): $(VLT_AR) $(VLT_COBJ) ${VLT_BUILDDIR}/lib/libfesvr.a
 	mkdir -p $(dir $@)
-	$(CXX) $(LDFLAGS) -L ${VLT_BUILDDIR}/lib -o $@ $(VLT_COBJ) $(VLT_AR) -lpthread -lfesvr -lutil -latomic
+	$(CXX) $(LDFLAGS) -L ${VLT_BUILDDIR}/lib -o $@ $(VLT_COBJ) $(VLT_AR) -lpthread -lfesvr -lutil $(VLT_LDLIBS)
 
 # Clean all build directories and temporary files for Verilator simulation
 .PHONY: clean.vlt
 clean.vlt:
-	rm -rf work-vlt
-	rm -f bin/spatz_cluster.vlt
+	rm -rf work-vlt work-vlt-fst work-vlt-fi
+	rm -f bin/spatz_cluster.vlt bin/spatz_cluster_fst.vlt bin/spatz_cluster_fi.vlt
 
 ############
 # Modelsim #

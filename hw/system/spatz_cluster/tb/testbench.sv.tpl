@@ -237,10 +237,10 @@ module testharness (
     while (cluster_probe)
       @(posedge clk_i);
 
+    // Stop dumping, but let the program run to completion: with Verilator,
+    // $finish here would end the RTL loop while the HTIF host side keeps
+    // waiting for the exit code, and the simulation hangs.
     $dumpoff;
-
-    // Stop the execution
-    $finish(0);
   end: vcd_dump
 `endif
 

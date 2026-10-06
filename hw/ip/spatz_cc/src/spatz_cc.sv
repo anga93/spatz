@@ -487,7 +487,7 @@ module spatz_cc
     /* verilator lint_off STMTDLY */
     @(posedge clk_i);
     /* verilator lint_on STMTDLY */
-    $system("mkdir logs -p");
+    $system("mkdir -p logs");
     $sformat(fn, "logs/trace_hart_%05x.dasm", hart_id_i);
     f = $fopen(fn, "w");
     $display("[Tracer] Logging Hart %d to %s", hart_id_i, fn);

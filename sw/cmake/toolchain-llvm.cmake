@@ -44,6 +44,13 @@ endif()
 # `#if ELEN==64` guards keep per-config execution identical to main.
 set(SPATZ_MARCH_ENCODE_ALL rv32imafdv_zfh_xdma_xsmallfloatb_xsmallfloath_xrrpost_xvfx_xvfwdotp)
 
+# On a macOS host, CMake otherwise assumes a native Darwin target and adds
+# -arch/-isysroot flags that the RISC-V compiler rejects.
+if (CMAKE_HOST_APPLE)
+  set(CMAKE_SYSTEM_NAME Generic)
+  set(CMAKE_SYSTEM_PROCESSOR riscv32)
+endif()
+
 # Look for the precompiled binaries
 set(CMAKE_C_COMPILER ${LLVM_PATH}/bin/clang)
 set(CMAKE_CXX_COMPILER ${LLVM_PATH}/bin/clang++)
